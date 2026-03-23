@@ -2,6 +2,5 @@ streamlit
 pandas
 numpy
 plotly
-pydeck
 scikit-learn
-scipy
+mlxtend
