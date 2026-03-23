@@ -1,307 +1,357 @@
-import os
-import warnings
-import numpy as np
-import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
+import pandas as pd
+import numpy as np
 import plotly.express as px
-import pydeck as pdk
-
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+import plotly.graph_objects as go
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA
-from sklearn.ensemble import RandomForestRegressor, IsolationForest
+from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from mlxtend.frequent_patterns import apriori, association_rules
+import io
 
-warnings.filterwarnings("ignore")
+# ----------------------------------------
+# PAGE CONFIGURATION & THEME
+# ----------------------------------------
+st.set_page_config(
+    page_title="EV Smart Analytics & Interactive Car Experience",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. PAGE CONFIGURATION & THEME
-# ─────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="EV Analytics Pro", page_icon="⚡", layout="wide")
+# Custom CSS for dark futuristic theme
+st.markdown("""
+    <style>
+    .stApp {
+        background-color: #0d1117;
+        color: #c9d1d9;
+    }
+    h1, h2, h3 { color: #58a6ff; }
+    .stButton>button {
+        background-color: #238636;
+        color: white;
+        border-radius: 8px;
+        border: 1px solid #2ea043;
+    }
+    .stButton>button:hover { background-color: #2ea043; }
+    </style>
+""", unsafe_allow_html=True)
 
-# Set a professional dark theme palette for Plotly/UI
-PALETTE = ["#e63946", "#f4a261", "#2a9d8f", "#e9c46a", "#264653", "#8ab17d", "#e76f51", "#1d3557"]
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. DATA PROCESSING & 38 ENGINEERED FEATURES (Summative Assessment Pipeline)
-# ─────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------
+# ⚙️ STEP 1-3: DATA LOADING & PREPROCESSING
+# ----------------------------------------
 @st.cache_data
-def load_and_engineer_data():
-    # Robust Pathing
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    DATA_PATH = os.path.join(BASE_DIR, "detailed_ev_charging_stations.csv")
-    
-    if not os.path.exists(DATA_PATH):
-        st.error("Dataset missing! Please ensure 'detailed_ev_charging_stations.csv' is in the project folder.")
-        st.stop()
+def load_and_preprocess_data():
+    # 1. Load Data
+    try:
+        df = pd.read_csv("detailed_ev_charging_stations.csv")
+    except FileNotFoundError:
+        st.error("Error: 'detailed_ev_charging_stations.csv' not found. Please ensure it's in the same directory.")
+        return None
 
-    df = pd.read_csv(DATA_PATH)
+    # 2. Data Cleaning
+    df = df.drop_duplicates(subset=['Station ID'])
     
-    # Standardize column names (Streamlit maps strictly require 'lat' and 'lon')
-    df.columns = [
-        "station_id", "lat", "lon", "address", "charger_type", "cost_per_kwh", 
-        "availability", "dist_to_city_km", "usage_per_day", "operator", "capacity_kw", 
-        "connector_types", "install_year", "renewable", "rating", "parking_spots", "maintenance_freq"
-    ]
-    
-    # Handle Missing Values
-    for c in df.select_dtypes(include=np.number).columns: 
-        df[c].fillna(df[c].median(), inplace=True)
-    for c in df.select_dtypes(include="object").columns:  
-        df[c].fillna(df[c].mode()[0], inplace=True)
-    df.drop_duplicates(subset="station_id", inplace=True)
+    # Fill missing values
+    num_cols = df.select_dtypes(include=['float64', 'int64']).columns
+    df[num_cols] = df[num_cols].fillna(df[num_cols].mean())
+    cat_cols = df.select_dtypes(include=['object']).columns
+    df[cat_cols] = df[cat_cols].fillna(df[cat_cols].mode().iloc[0])
 
-    # ── 38 PRO-LEVEL ENGINEERED FEATURES ─────────────────────────────────────
-    # Time & Age Metrics
-    df["F01_age_yrs"] = 2024 - df["install_year"]
-    df["F02_age_squared"] = df["F01_age_yrs"] ** 2
-    df["F03_is_new_station"] = (df["F01_age_yrs"] <= 3).astype(int)
+    # 3. Feature Engineering
+    df['Cost Efficiency'] = df['Usage Stats (avg users/day)'] / df['Cost (USD/kWh)'].replace(0, 0.01) # Avoid division by zero
     
-    # Efficiency & Financials
-    df["F04_usage_per_capacity"] = df["usage_per_day"] / df["capacity_kw"].clip(1)
-    df["F05_capacity_utilization"] = (df["F04_usage_per_capacity"] * 100).round(2)
-    df["F06_cost_efficiency"] = (df["usage_per_day"] / df["cost_per_kwh"].clip(0.01)).round(2)
-    df["F07_revenue_proxy"] = (df["usage_per_day"] * df["cost_per_kwh"] * 30).round(2)
-    df["F08_revenue_per_spot"] = (df["F07_revenue_proxy"] / df["parking_spots"].clip(1)).round(2)
-    df["F09_usage_per_spot"] = (df["usage_per_day"] / df["parking_spots"].clip(1)).round(2)
-    
-    # Weighted Master Score
-    df["F10_performance_score"] = ((df["usage_per_day"]/100)*0.35 + (1-df["cost_per_kwh"]/0.5)*0.20 + (df["rating"]/5)*0.25).round(4)
-    
-    # Geospatial Transformations
-    df["F11_dist_squared"] = df["dist_to_city_km"] ** 2
-    df["F12_log_dist"] = np.log1p(df["dist_to_city_km"])
-    df["F13_abs_lat"] = df["lat"].abs()
-    
-    # Categorical Encodings
-    df["F14_is_247"] = (df["availability"] == "24/7").astype(int)
-    df["F15_is_renewable"] = (df["renewable"] == "Yes").astype(int)
-    df["F16_maintenance_score"] = df["maintenance_freq"].map({"Monthly": 3, "Quarterly": 2, "Annually": 1}).fillna(1)
-    df["F17_maint_x_rating"] = df["F16_maintenance_score"] * df["rating"]
-    
-    # Hardware Capabilities
-    df["F18_num_connectors"] = df["connector_types"].str.split(",").apply(len)
-    df["F19_has_ccs"] = df["connector_types"].str.contains("CCS", case=False).astype(int)
-    df["F20_has_tesla"] = df["connector_types"].str.contains("Tesla", case=False).astype(int)
-    df["F21_charger_type_num"] = df["charger_type"].map({"AC Level 1": 1, "AC Level 2": 2, "DC Fast Charger": 3}).fillna(1)
-    df["F22_is_fast_charger"] = (df["F21_charger_type_num"] == 3).astype(int)
-    
-    # Interaction Features
-    df["F23_capacity_x_247"] = df["capacity_kw"] * df["F14_is_247"]
-    df["F24_renewable_x_rating"] = df["F15_is_renewable"] * df["rating"]
-    df["F25_age_x_usage"] = df["F01_age_yrs"] * df["usage_per_day"]
-    df["F26_cost_x_dist"] = df["cost_per_kwh"] * df["dist_to_city_km"]
-    df["F27_parking_x_capacity"] = df["parking_spots"] * df["capacity_kw"]
-    
-    # Normalization (Log Transforms)
-    df["F28_log_usage"] = np.log1p(df["usage_per_day"])
-    df["F29_log_capacity"] = np.log1p(df["capacity_kw"])
-    df["F30_log_revenue"] = np.log1p(df["F07_revenue_proxy"])
-    
-    # Environmental Metrics
-    df["F31_operator_encoded"] = LabelEncoder().fit_transform(df["operator"])
-    df["F32_co2_saved_kg"] = (df["usage_per_day"] * 7.5 * 30).round(1)
-    
-    # F33-F35: Advanced K-Means Clustering
-    clust_feats = ["usage_per_day", "cost_per_kwh", "capacity_kw", "rating", "dist_to_city_km"]
-    X_sc = StandardScaler().fit_transform(df[clust_feats])
-    km = KMeans(n_clusters=4, random_state=42, n_init=10)
-    df["F33_cluster"] = km.fit_predict(X_sc).astype(str) # String format for Plotly discrete colors
-    
-    pca = PCA(n_components=2, random_state=42)
-    pca_coords = pca.fit_transform(X_sc)
-    df["F34_pca1"], df["F35_pca2"] = pca_coords[:, 0], pca_coords[:, 1]
+    # Demand Level
+    def demand_level(x):
+        if x > 75: return 'High'
+        elif x >= 40: return 'Medium'
+        else: return 'Low'
+    df['Demand Level'] = df['Usage Stats (avg users/day)'].apply(demand_level)
 
-    # F36-F38: Advanced Anomaly Detection (Isolation Forest)
-    iso = IsolationForest(contamination=0.05, random_state=42)
-    df["F36_is_anomaly"] = (iso.fit_predict(X_sc) == -1).astype(int)
-    df["F37_zscore"] = np.abs((df["usage_per_day"] - df["usage_per_day"].mean()) / df["usage_per_day"].std())
-    df["F38_anomaly_type"] = np.where(df["F36_is_anomaly"] == 1, "Flagged Outlier", "Normal Data")
+    # Distance Category
+    def distance_cat(x):
+        if x < 10: return 'Near'
+        elif x <= 30: return 'Mid'
+        else: return 'Far'
+    df['Distance Category'] = df['Distance to City (km)'].apply(distance_cat)
+
+    # Encoding
+    le = LabelEncoder()
+    df['Charger_Type_Encoded'] = le.fit_transform(df['Charger Type'])
+    df['Operator_Encoded'] = le.fit_transform(df['Station Operator'])
+    df['Renewable_Encoded'] = df['Renewable Energy Source'].apply(lambda x: 1 if x == 'Yes' else 0)
 
     return df
 
-df = load_and_engineer_data()
+df = load_and_preprocess_data()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. SIDEBAR CONTROLS
-# ─────────────────────────────────────────────────────────────────────────────
-st.sidebar.image("https://cdn-icons-png.flaticon.com/512/2885/2885068.png", width=50)
-st.sidebar.title("⚡ EV Control Panel")
-st.sidebar.markdown("Filter the global dataset dynamically.")
-
-selected_op = st.sidebar.multiselect("Network Operator", df["operator"].unique(), default=df["operator"].unique()[:4])
-filtered_df = df[df["operator"].isin(selected_op)]
-
-st.sidebar.divider()
-st.sidebar.subheader("Export Center")
-st.sidebar.markdown("Download the fully processed dataset with all 38 engineered features included.")
-csv = df.to_csv(index=False).encode('utf-8')
-st.sidebar.download_button(
-    label="📥 Download Data (.csv)", 
-    data=csv, 
-    file_name="ev_analytics_pro_data.csv", 
-    mime="text/csv"
-)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. MAIN DASHBOARD: 3D GRAPHICS & ML
-# ─────────────────────────────────────────────────────────────────────────────
-st.title("Electric Vehicle Network Analytics")
-st.markdown("Advanced data mining and 3D modeling powered by **38 engineered features**, **K-Means Clustering**, and **Anomaly Detection**.")
-
-# 5 Sleek Tabs for the UI
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🚗 3D EV Showroom", 
-    "🌍 3D Geospatial Map", 
-    "🧊 Data Clustering", 
-    "🚨 Anomaly Detection", 
-    "🧠 Machine Learning Engine"
-])
-
-# ── TAB 1: 3D EV SHOWROOM (REALISTIC CAR MODEL) ──────────────────────────────
-with tab1:
-    st.subheader("Interactive WebGL Vehicle Rendering")
-    st.markdown("Drag to rotate, scroll to zoom in/out. Fully rendered in real-time.")
+if df is not None:
+    # ----------------------------------------
+    # 🧭 STEP 14: APP NAVIGATION STRUCTURE
+    # ----------------------------------------
+    st.sidebar.title("⚡ EV Dashboard")
+    st.sidebar.markdown("---")
     
-    # Injecting HTML/JS to render the 3D model (Using a realistic Ferrari GLB from a reliable CDN)
-    components.html('''
-        <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.1.1/model-viewer.min.js"></script>
-        <model-viewer 
-            src="https://cdn.jsdelivr.net/gh/mrdoob/three.js@master/examples/models/gltf/ferrari.glb" 
-            alt="A realistic 3D model of an Electric Vehicle" 
-            auto-rotate 
-            camera-controls 
-            environment-image="neutral"
-            shadow-intensity="2"
-            exposure="1.2"
-            camera-orbit="45deg 55deg 3m"
-            style="width: 100%; height: 550px; background: radial-gradient(circle, #2b2b2b 0%, #0d1117 100%); border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5);">
-        </model-viewer>
-    ''', height=600)
+    menu = st.sidebar.radio("Navigate", [
+        "📊 Dashboard & EDA", 
+        "🗺️ Map View", 
+        "🤖 Clustering & ML", 
+        "🚨 Anomaly Detection", 
+        "🔗 Association Rules",
+        "📈 Demand Prediction",
+        "🚗 3D EV Experience",
+        "📘 Learn EV",
+        "🎮 Fun Zone"
+    ])
 
-# ── TAB 2: 3D PYDECK MAP ─────────────────────────────────────────────────────
-with tab2:
-    st.subheader("Global 3D Station Density")
-    st.markdown("Hold `Right-Click` to rotate and pitch the map. Hexagon height indicates station density.")
-    
-    layer = pdk.Layer(
-        'HexagonLayer',
-        data=filtered_df,
-        get_position='[lon, lat]',
-        radius=40000,          # Size of the hex bins
-        elevation_scale=800,   # Scales the height for 3D visibility
-        elevation_range=[0, 3000],
-        pickable=True,
-        extruded=True,
-        get_fill_color="[230, 57, 70, 200]" # Match the Red UI aesthetic
-    )
-    
-    view_state = pdk.ViewState(
-        latitude=filtered_df["lat"].mean(),
-        longitude=filtered_df["lon"].mean(),
-        zoom=3.5,
-        pitch=50,
-        bearing=-15
-    )
-    
-    st.pydeck_chart(pdk.Deck(
-        map_style='mapbox://styles/mapbox/dark-v10',
-        layers=[layer], 
-        initial_view_state=view_state, 
-        tooltip={"text": "Station Density Elevation: {elevationValue}"}
-    ))
+    st.sidebar.markdown("---")
+    st.sidebar.info("Developed for Advanced EV Analytics")
 
-# ── TAB 3: 3D PLOTLY GRAPHS ──────────────────────────────────────────────────
-with tab3:
-    st.subheader("Interactive 3D Feature Clustering (K-Means)")
-    st.markdown("Explore how Cost, Capacity, and Daily Usage interact. Data is grouped into 4 distinct clusters.")
-    
-    fig_3d = px.scatter_3d(
-        filtered_df, 
-        x='cost_per_kwh', 
-        y='capacity_kw', 
-        z='usage_per_day', 
-        color='F33_cluster',
-        size='parking_spots',
-        hover_name='operator',
-        template='plotly_dark',
-        color_discrete_sequence=PALETTE
-    )
-    fig_3d.update_layout(
-        scene=dict(xaxis_title='Cost ($)', yaxis_title='Capacity (kW)', zaxis_title='Usage/Day'),
-        margin=dict(l=0, r=0, b=0, t=0)
-    )
-    st.plotly_chart(fig_3d, use_container_width=True)
+    # Filters (applied globally to Dashboard and Map)
+    st.sidebar.subheader("🎛️ Global Filters")
+    cost_filter = st.sidebar.slider("Max Cost (USD/kWh)", float(df['Cost (USD/kWh)'].min()), float(df['Cost (USD/kWh)'].max()), float(df['Cost (USD/kWh)'].max()))
+    charger_filter = st.sidebar.selectbox("Charger Type", ['All'] + list(df['Charger Type'].unique()))
+    operator_filter = st.sidebar.selectbox("Operator", ['All'] + list(df['Station Operator'].unique()))
 
-# ── TAB 4: ANOMALY DETECTION (ISOLATION FOREST) ──────────────────────────────
-with tab4:
-    st.subheader("Outlier Detection Analysis")
-    st.markdown("Using Isolation Forest to automatically flag stations with abnormal operational patterns.")
-    
-    colA, colB = st.columns([1, 2])
-    
-    with colA:
-        anomaly_count = filtered_df["F36_is_anomaly"].sum()
-        normal_count = len(filtered_df) - anomaly_count
-        st.metric(label="Total Anomalies Detected", value=anomaly_count)
-        st.metric(label="Normal Stations", value=normal_count)
-        st.success(f"Anomaly Rate: {(anomaly_count/len(filtered_df)*100):.1f}%")
+    # Apply filters
+    filtered_df = df[df['Cost (USD/kWh)'] <= cost_filter]
+    if charger_filter != 'All': filtered_df = filtered_df[filtered_df['Charger Type'] == charger_filter]
+    if operator_filter != 'All': filtered_df = filtered_df[filtered_df['Station Operator'] == operator_filter]
+
+    # ----------------------------------------
+    # MENU: DASHBOARD & EDA
+    # ----------------------------------------
+    if menu == "📊 Dashboard & EDA":
+        st.title("📊 EV Analytics Dashboard")
         
-    with colB:
-        fig_anom = px.scatter(
-            filtered_df, 
-            x="cost_per_kwh", 
-            y="usage_per_day", 
-            color="F38_anomaly_type",
-            size="capacity_kw",
-            hover_name="station_id",
-            template="plotly_dark",
-            color_discrete_map={"Normal Data": "#2a9d8f", "Flagged Outlier": "#e63946"},
-            title="Usage vs. Cost (Anomalies Highlighted)"
-        )
-        st.plotly_chart(fig_anom, use_container_width=True)
+        # Top Metrics
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total Stations", len(filtered_df))
+        col2.metric("Avg Usage/Day", f"{filtered_df['Usage Stats (avg users/day)'].mean():.1f}")
+        col3.metric("Avg Cost ($/kWh)", f"{filtered_df['Cost (USD/kWh)'].mean():.2f}")
+        col4.metric("Avg Rating", f"{filtered_df['Reviews (Rating)'].mean():.1f} / 5.0")
 
-# ── TAB 5: PREDICTIVE MODEL & 38 FEATURES ────────────────────────────────────
-with tab5:
-    col1, col2 = st.columns([1, 2])
-    
-    with col1:
-        st.subheader("Feature Engineering Pipeline")
-        st.markdown(f"**{len([c for c in df.columns if c.startswith('F')])}** features generated.")
-        eng_features = [c for c in df.columns if c.startswith("F")]
-        st.dataframe(pd.DataFrame({"Engineered Column Name": eng_features}), height=450, use_container_width=True)
+        st.markdown("### 📊 Exploratory Data Analysis")
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["Data Preview", "Usage Dist", "Cost vs Operator", "Capacity vs Usage", "Heatmap"])
         
-    with col2:
-        st.subheader("Predictive Analytics (Random Forest)")
-        st.markdown("Predicting `usage_per_day` using a subset of our newly engineered features.")
+        with tab1:
+            st.dataframe(filtered_df.head(10))
+            # Export Feature
+            csv = filtered_df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Download Filtered Dataset", data=csv, file_name='filtered_ev_data.csv', mime='text/csv')
+
+        with tab2:
+            fig = px.histogram(filtered_df, x="Usage Stats (avg users/day)", color="Demand Level", title="Usage Distribution", template="plotly_dark")
+            st.plotly_chart(fig, use_container_width=True)
+            
+        with tab3:
+            fig = px.box(filtered_df, x="Station Operator", y="Cost (USD/kWh)", color="Station Operator", title="Cost by Operator", template="plotly_dark")
+            st.plotly_chart(fig, use_container_width=True)
+
+        with tab4:
+            fig = px.scatter(filtered_df, x="Charging Capacity (kW)", y="Usage Stats (avg users/day)", color="Charger Type", size="Reviews (Rating)", hover_data=["Station ID"], template="plotly_dark")
+            st.plotly_chart(fig, use_container_width=True)
+
+        with tab5:
+            corr = filtered_df[['Cost (USD/kWh)', 'Distance to City (km)', 'Usage Stats (avg users/day)', 'Charging Capacity (kW)', 'Reviews (Rating)']].corr()
+            fig = px.imshow(corr, text_auto=True, title="Correlation Heatmap", template="plotly_dark", color_continuous_scale="Viridis")
+            st.plotly_chart(fig, use_container_width=True)
+
+        # AI Recommendation
+        st.markdown("### 🤖 AI Station Recommendation")
+        recommendation = filtered_df.sort_values(by=['Reviews (Rating)', 'Cost (USD/kWh)', 'Usage Stats (avg users/day)'], ascending=[False, True, False]).head(1)
+        if not recommendation.empty:
+            st.success(f"**Recommended Station:** {recommendation['Station ID'].values[0]} | **Operator:** {recommendation['Station Operator'].values[0]} | **Rating:** {recommendation['Reviews (Rating সদর)'].values[0] if 'Reviews (Rating সদর)' in recommendation else recommendation['Reviews (Rating)'].values[0]} ⭐ | **Cost:** ${recommendation['Cost (USD/kWh)'].values[0]}/kWh")
+
+    # ----------------------------------------
+    # MENU: MAP VIEW
+    # ----------------------------------------
+    elif menu == "🗺️ Map View":
+        st.title("🗺️ Station Locations")
+        fig = px.scatter_mapbox(filtered_df, lat="Latitude", lon="Longitude", color="Demand Level",
+                                size="Usage Stats (avg users/day)", hover_name="Station ID",
+                                hover_data=["Cost (USD/kWh)", "Reviews (Rating)", "Station Operator"],
+                                color_discrete_map={"High": "red", "Medium": "yellow", "Low": "green"},
+                                zoom=2, height=600)
+        fig.update_layout(mapbox_style="carto-darkmatter", margin={"r":0,"t":0,"l":0,"b":0})
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ----------------------------------------
+    # MENU: CLUSTERING
+    # ----------------------------------------
+    elif menu == "🤖 Clustering & ML":
+        st.title("🤖 Station Clustering (K-Means)")
+        features = ['Usage Stats (avg users/day)', 'Cost (USD/kWh)', 'Charging Capacity (kW)']
+        X = df[features].dropna()
         
-        # Supervised ML Model
-        ml_features = ["F01_age_yrs", "F06_cost_efficiency", "F11_dist_squared", "F16_maintenance_score", "F22_is_fast_charger", "capacity_kw"]
-        X = df[ml_features].dropna()
-        y = df.loc[X.index, "usage_per_day"]
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+
+        k = st.slider("Select Number of Clusters (K)", 2, 10, 3)
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+        clusters = kmeans.fit_predict(X_scaled)
+        
+        plot_df = X.copy()
+        plot_df['Cluster'] = clusters.astype(str)
+
+        fig = px.scatter_3d(plot_df, x='Usage Stats (avg users/day)', y='Cost (USD/kWh)', z='Charging Capacity (kW)',
+                            color='Cluster', title=f"K-Means Clustering (K={k})", template="plotly_dark")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ----------------------------------------
+    # MENU: ANOMALY DETECTION
+    # ----------------------------------------
+    elif menu == "🚨 Anomaly Detection":
+        st.title("🚨 Usage Anomaly Detection (Z-Score)")
+        
+        df_anomaly = df.copy()
+        mean_usage = df_anomaly['Usage Stats (avg users/day)'].mean()
+        std_usage = df_anomaly['Usage Stats (avg users/day)'].std()
+        
+        df_anomaly['Z-Score'] = (df_anomaly['Usage Stats (avg users/day)'] - mean_usage) / std_usage
+        threshold = st.slider("Z-Score Threshold", 1.0, 5.0, 2.5)
+        
+        df_anomaly['Anomaly'] = df_anomaly['Z-Score'].apply(lambda x: 'Anomaly (High/Low)' if abs(x) > threshold else 'Normal')
+        
+        fig = px.scatter(df_anomaly, x="Station ID", y="Usage Stats (avg users/day)", color="Anomaly",
+                         color_discrete_map={'Normal': '#58a6ff', 'Anomaly (High/Low)': '#ff4444'},
+                         title="Station Usage Anomalies", template="plotly_dark")
+        st.plotly_chart(fig, use_container_width=True)
+        
+        st.write("### Anomaly Data")
+        st.dataframe(df_anomaly[df_anomaly['Anomaly'] != 'Normal'][['Station ID', 'Usage Stats (avg users/day)', 'Z-Score']])
+
+    # ----------------------------------------
+    # MENU: ASSOCIATION RULES
+    # ----------------------------------------
+    elif menu == "🔗 Association Rules":
+        st.title("🔗 Association Rule Mining (Apriori)")
+        st.markdown("Discover hidden patterns like: *Low Cost + Fast Charger -> High Demand*")
+        
+        # Prepare transactional data
+        assoc_df = df[['Demand Level', 'Distance Category', 'Charger Type']].copy()
+        assoc_df['Cost Level'] = pd.qcut(df['Cost (USD/kWh)'], q=3, labels=['Low Cost', 'Mid Cost', 'High Cost'])
+        
+        # One-hot encode
+        basket = pd.get_dummies(assoc_df).astype(bool)
+        
+        min_support = st.slider("Minimum Support", 0.05, 0.5, 0.1)
+        frequent_itemsets = apriori(basket, min_support=min_support, use_colnames=True)
+        
+        if not frequent_itemsets.empty:
+            rules = association_rules(frequent_itemsets, metric="lift", min_threshold=1.0)
+            rules = rules.sort_values('lift', ascending=False).head(20)
+            
+            # Formatting for display
+            rules['antecedents'] = rules['antecedents'].apply(lambda x: ', '.join(list(x)))
+            rules['consequents'] = rules['consequents'].apply(lambda x: ', '.join(list(x)))
+            
+            st.dataframe(rules[['antecedents', 'consequents', 'support', 'confidence', 'lift']])
+        else:
+            st.warning("No rules found. Try lowering the support threshold.")
+
+    # ----------------------------------------
+    # MENU: DEMAND PREDICTION
+    # ----------------------------------------
+    elif menu == "📈 Demand Prediction":
+        st.title("📈 Demand Prediction (Machine Learning)")
+        
+        features = ['Cost (USD/kWh)', 'Charging Capacity (kW)', 'Distance to City (km)']
+        target = 'Usage Stats (avg users/day)'
+        
+        X = df[features]
+        y = df[target]
         
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        rf = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
-        rf.fit(X_train, y_train)
-        preds = rf.predict(X_test)
+        model = LinearRegression()
+        model.fit(X_train, y_train)
+        predictions = model.predict(X_test)
         
-        # Scoring metrics ($R^2$, MAE, RMSE)
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Model $R^2$ Score", f"{r2_score(y_test, preds):.3f}")
-        c2.metric("Mean Abs Error (MAE)", f"{mean_absolute_error(y_test, preds):.2f}")
-        c3.metric("Root Mean Sq Error", f"{np.sqrt(mean_squared_error(y_test, preds)):.2f}")
+        st.subheader("Predict Usage for a New Station")
+        col1, col2, col3 = st.columns(3)
+        p_cost = col1.number_input("Cost ($/kWh)", 0.1, 1.0, 0.3)
+        p_cap = col2.number_input("Capacity (kW)", 10, 350, 50)
+        p_dist = col3.number_input("Distance to City (km)", 0.0, 100.0, 10.0)
         
-        # Feature Importance Chart
-        fig_imp = px.bar(
-            x=rf.feature_importances_, 
-            y=ml_features, 
-            orientation='h', 
-            template='plotly_dark',
-            title='Random Forest Feature Importance',
-            labels={'x': 'Relative Importance', 'y': 'Input Feature'},
-            color_discrete_sequence=["#e9c46a"]
-        )
-        fig_imp.update_layout(margin=dict(l=0, r=0, b=0, t=40))
-        st.plotly_chart(fig_imp, use_container_width=True)
+        if st.button("Predict Expected Users/Day"):
+            pred = model.predict([[p_cost, p_cap, p_dist]])[0]
+            st.success(f"Predicted Average Users per Day: **{pred:.2f}**")
+            
+        fig = px.scatter(x=y_test, y=predictions, labels={'x': 'Actual Usage', 'y': 'Predicted Usage'}, 
+                         title="Model Performance: Actual vs Predicted", template="plotly_dark")
+        fig.add_shape(type="line", x0=y.min(), y0=y.min(), x1=y.max(), y1=y.max(), line=dict(color="red", dash="dash"))
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ----------------------------------------
+    # MENU: 3D EV CAR EXPERIENCE
+    # ----------------------------------------
+    elif menu == "🚗 3D EV Experience":
+        st.title("🚗 Interactive 3D EV Experience")
+        st.markdown("Rotate, zoom, and explore the EV components.")
+        
+        # Embedding Google's Model Viewer for a 3D Car Model
+        # Note: Using a standard open-source GLTF model URL
+        html_code = """
+        <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.1.1/model-viewer.min.js"></script>
+        <div style="display: flex; justify-content: center; background-color: #161b22; border-radius: 10px; padding: 20px;">
+            <model-viewer 
+                src="https://modelviewer.dev/shared-assets/models/Astronaut.glb" 
+                alt="A 3D model" 
+                auto-rotate 
+                camera-controls 
+                style="width: 100%; height: 500px; outline: none;">
+                
+                <button slot="hotspot-battery" data-position="0 0.5 0" data-normal="0 1 0" style="background: #58a6ff; color: white; border: none; border-radius: 5px; padding: 5px;">Battery Pack</button>
+                <button slot="hotspot-motor" data-position="0 1 0.5" data-normal="0 1 0" style="background: #238636; color: white; border: none; border-radius: 5px; padding: 5px;">Electric Motor</button>
+            </model-viewer>
+        </div>
+        <p style="text-align: center; color: #8b949e; margin-top: 10px;"><i>Note: Placeholder model used. In production, link to a .glb EV model.</i></p>
+        """
+        st.components.v1.html(html_code, height=600)
+        
+        st.info("**Key Components:**\n- **Battery Pack:** Stores electrical energy.\n- **Electric Motor:** Drives the wheels.\n- **Inverter:** Converts DC to AC power.\n- **Cooling System:** Regulates thermal temps.")
+
+    # ----------------------------------------
+    # MENU: LEARN EV
+    # ----------------------------------------
+    elif menu == "📘 Learn EV":
+        st.title("📘 Learn About Electric Vehicles")
+        
+        with st.expander("🤔 How does an EV work?"):
+            st.write("Unlike traditional vehicles that use internal combustion engines, electric vehicles run on electric motors powered by rechargeable battery packs. They have fewer moving parts, resulting in lower maintenance and zero tailpipe emissions.")
+            
+        with st.expander("⚡ Types of EV Chargers"):
+            st.markdown("""
+            - **Level 1 (AC):** Uses standard 120V outlet. Slowest charging (~3-5 miles range per hour).
+            - **Level 2 (AC):** Uses 240V. Common in homes and public stations (~15-30 miles range per hour).
+            - **DC Fast Charging:** Direct current, bypasses onboard charger. Can charge up to 80% in 20-30 minutes.
+            """)
+            
+        with st.expander("🌱 EV vs Petrol Comparison"):
+            st.write("**Efficiency:** EVs convert ~77% of electrical energy to the wheels. Gasoline vehicles only convert ~12%-30% of energy stored in fuel.")
+
+        st.subheader("💡 Fun EV Facts")
+        st.success("- The first practical electric car was built in the 1880s!\n- Regenerative braking captures kinetic energy and stores it back in the battery.\n- EVs are completely silent, so manufacturers add artificial sounds at low speeds for pedestrian safety.")
+
+    # ----------------------------------------
+    # MENU: FUN ZONE (GAMES)
+    # ----------------------------------------
+    elif menu == "🎮 Fun Zone":
+        st.title("🎮 EV Mini-Games & Quiz")
+        
+        st.subheader("Quiz: Test your EV Knowledge!")
+        q1 = st.radio("1. What does DC stand for in DC Fast Charging?", ("Direct Current", "Dual Charge", "Dynamic Current"), index=None)
+        q2 = st.radio("2. Which component converts DC battery power to AC for the motor?", ("Alternator", "Inverter", "Radiator"), index=None)
+        q3 = st.radio("3. Average efficiency of an EV motor is around:", ("30%", "50%", "90%"), index=None)
+        
+        if st.button("Submit Quiz"):
+            score = 0
+            if q1 == "Direct Current": score += 1
+            if q2 == "Inverter": score += 1
+            if q3 == "90%": score += 1
+            
+            st.balloons() if score == 3 else None
+            st.write(f"### Your Score: {score}/3")
+            if score == 3: st.success("🎉 You are an EV Expert!")
+            else: st.info("Keep learning in the 'Learn EV' tab!")
