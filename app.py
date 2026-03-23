@@ -96,7 +96,7 @@ section("1 · DATA LOADING")
 DATA_PATH = "detailed_ev_charging_stations.csv"
 # fallback – look in uploads folder if not in cwd
 if not os.path.exists(DATA_PATH):
-    DATA_PATH = "/mnt/user-data/uploads/detailed_ev_charging_stations.csv"
+    DATA_PATH = "detailed_ev_charging_stations.csv"
 
 df_raw = pd.read_csv(DATA_PATH)
 print(f"  Rows    : {len(df_raw):,}")
