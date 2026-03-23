@@ -106,7 +106,7 @@ if df is not None:
     ])
 
     st.sidebar.markdown("---")
-    st.sidebar.info("Developed for Advanced EV Analytics")
+    st.sidebar.info("Student Sample Project: EV Analytics")
 
     # Filters (applied globally to Dashboard and Map)
     st.sidebar.subheader("🎛️ Global Filters")
@@ -162,7 +162,7 @@ if df is not None:
         st.markdown("### 🤖 AI Station Recommendation")
         recommendation = filtered_df.sort_values(by=['Reviews (Rating)', 'Cost (USD/kWh)', 'Usage Stats (avg users/day)'], ascending=[False, True, False]).head(1)
         if not recommendation.empty:
-            st.success(f"**Recommended Station:** {recommendation['Station ID'].values[0]} | **Operator:** {recommendation['Station Operator'].values[0]} | **Rating:** {recommendation['Reviews (Rating সদর)'].values[0] if 'Reviews (Rating সদর)' in recommendation else recommendation['Reviews (Rating)'].values[0]} ⭐ | **Cost:** ${recommendation['Cost (USD/kWh)'].values[0]}/kWh")
+            st.success(f"**Recommended Station:** {recommendation['Station ID'].values[0]} | **Operator:** {recommendation['Station Operator'].values[0]} | **Rating:** {recommendation['Reviews (Rating)'].values[0]} ⭐ | **Cost:** ${recommendation['Cost (USD/kWh)'].values[0]}/kWh")
 
     # ----------------------------------------
     # MENU: MAP VIEW
@@ -290,23 +290,21 @@ if df is not None:
         st.title("🚗 Interactive 3D EV Experience")
         st.markdown("Rotate, zoom, and explore the EV components.")
         
-        # Embedding Google's Model Viewer for a 3D Car Model
-        # Note: Using a standard open-source GLTF model URL
+        # Embedding Google's Model Viewer with an open-source car model
         html_code = """
         <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.1.1/model-viewer.min.js"></script>
         <div style="display: flex; justify-content: center; background-color: #161b22; border-radius: 10px; padding: 20px;">
             <model-viewer 
-                src="https://modelviewer.dev/shared-assets/models/Astronaut.glb" 
-                alt="A 3D model" 
+                src="https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/master/2.0/ToyCar/glTF-Binary/ToyCar.glb" 
+                alt="A 3D model of a car" 
                 auto-rotate 
                 camera-controls 
                 style="width: 100%; height: 500px; outline: none;">
                 
-                <button slot="hotspot-battery" data-position="0 0.5 0" data-normal="0 1 0" style="background: #58a6ff; color: white; border: none; border-radius: 5px; padding: 5px;">Battery Pack</button>
-                <button slot="hotspot-motor" data-position="0 1 0.5" data-normal="0 1 0" style="background: #238636; color: white; border: none; border-radius: 5px; padding: 5px;">Electric Motor</button>
+                <button slot="hotspot-battery" data-position="0 0.1 0" data-normal="0 1 0" style="background: #58a6ff; color: white; border: none; border-radius: 5px; padding: 5px; font-weight: bold;">Battery Pack</button>
+                <button slot="hotspot-motor" data-position="0 0.3 0.8" data-normal="0 1 0" style="background: #238636; color: white; border: none; border-radius: 5px; padding: 5px; font-weight: bold;">Electric Motor</button>
             </model-viewer>
         </div>
-        <p style="text-align: center; color: #8b949e; margin-top: 10px;"><i>Note: Placeholder model used. In production, link to a .glb EV model.</i></p>
         """
         st.components.v1.html(html_code, height=600)
         
@@ -341,17 +339,26 @@ if df is not None:
         st.title("🎮 EV Mini-Games & Quiz")
         
         st.subheader("Quiz: Test your EV Knowledge!")
-        q1 = st.radio("1. What does DC stand for in DC Fast Charging?", ("Direct Current", "Dual Charge", "Dynamic Current"), index=None)
-        q2 = st.radio("2. Which component converts DC battery power to AC for the motor?", ("Alternator", "Inverter", "Radiator"), index=None)
-        q3 = st.radio("3. Average efficiency of an EV motor is around:", ("30%", "50%", "90%"), index=None)
         
-        if st.button("Submit Quiz"):
-            score = 0
-            if q1 == "Direct Current": score += 1
-            if q2 == "Inverter": score += 1
-            if q3 == "90%": score += 1
+        # Simple form for quiz to prevent auto-reloading weirdness
+        with st.form("quiz_form"):
+            q1 = st.radio("1. What does DC stand for in DC Fast Charging?", ("Direct Current", "Dual Charge", "Dynamic Current"), index=None)
+            q2 = st.radio("2. Which component converts DC battery power to AC for the motor?", ("Alternator", "Inverter", "Radiator"), index=None)
+            q3 = st.radio("3. Average efficiency of an EV motor is around:", ("30%", "50%", "90%"), index=None)
             
-            st.balloons() if score == 3 else None
-            st.write(f"### Your Score: {score}/3")
-            if score == 3: st.success("🎉 You are an EV Expert!")
-            else: st.info("Keep learning in the 'Learn EV' tab!")
+            submitted = st.form_submit_button("Submit Quiz")
+            
+            if submitted:
+                score = 0
+                if q1 == "Direct Current": score += 1
+                if q2 == "Inverter": score += 1
+                if q3 == "90%": score += 1
+                
+                if score == 3:
+                    st.balloons()
+                    
+                st.write(f"### Your Score: {score}/3")
+                if score == 3: 
+                    st.success("🎉 You are an EV Expert!")
+                else: 
+                    st.info("Keep learning in the 'Learn EV' tab!")
